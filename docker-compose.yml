@@ -1,0 +1,97 @@
+# docker compose up --build
+# Works without any API key: the agent starts with LLM_PROVIDER=fake (scripted responses).
+# Every variable below can be overridden through a .env file (see .env.example).
+name: desafio
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
+      POSTGRES_DB: ${POSTGRES_DB:-desafio}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    configs:
+      # Runs once, on the first start of an empty volume.
+      - source: pg_init_roles
+        target: /docker-entrypoint-initdb.d/01-roles.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+
+  order-api:
+    build:
+      context: .
+      dockerfile: apps/order-api/Dockerfile
+    environment:
+      ORDER_API_PORT: "3001"
+      # Own database user: it only owns the `orders` schema.
+      DATABASE_URL: postgres://orders_svc:${ORDER_DB_PASSWORD:-orders_svc}@postgres:5432/${POSTGRES_DB:-desafio}
+      ORDER_API_TOKEN: ${ORDER_API_TOKEN:-change-me-dev-token}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      # Migrations and demo data are applied at startup (both idempotent).
+      AUTO_MIGRATE: "true"
+      AUTO_SEED: "true"
+    ports:
+      - "${ORDER_API_HOST_PORT:-3001}:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+  agent:
+    build:
+      context: .
+      dockerfile: apps/agent/Dockerfile
+    environment:
+      AGENT_PORT: "3002"
+      # Own database user: it only owns the `agent` schema.
+      AGENT_DATABASE_URL: postgres://agent_svc:${AGENT_DB_PASSWORD:-agent_svc}@postgres:5432/${POSTGRES_DB:-desafio}
+      ORDER_API_URL: http://order-api:3001
+      ORDER_API_TOKEN: ${ORDER_API_TOKEN:-change-me-dev-token}
+      FAKESTORE_URL: ${FAKESTORE_URL:-https://fakestoreapi.com}
+      # fake = scripted responses, no API key needed | gemini = real model (needs GOOGLE_API_KEY)
+      LLM_PROVIDER: ${LLM_PROVIDER:-fake}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      LLM_UNDERSTAND_MODEL: ${LLM_UNDERSTAND_MODEL:-gemini-3.5-flash-lite}
+      LLM_COMPOSE_MODEL: ${LLM_COMPOSE_MODEL:-gemini-3.5-flash-lite}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    ports:
+      - "${AGENT_HOST_PORT:-3002}:3002"
+    depends_on:
+      order-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3002/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+
+configs:
+  pg_init_roles:
+    content: |
+      -- One database user per service; each owns only its own schema.
+      CREATE ROLE orders_svc LOGIN PASSWORD '${ORDER_DB_PASSWORD:-orders_svc}';
+      CREATE ROLE agent_svc LOGIN PASSWORD '${AGENT_DB_PASSWORD:-agent_svc}';
+      -- CREATE SCHEMA IF NOT EXISTS checks this privilege before checking existence.
+      GRANT CREATE ON DATABASE "${POSTGRES_DB:-desafio}" TO orders_svc, agent_svc;
+      CREATE SCHEMA orders AUTHORIZATION orders_svc;
+      CREATE SCHEMA agent AUTHORIZATION agent_svc;

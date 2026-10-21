@@ -1,0 +1,17 @@
+**/node_modules
+**/dist
+**/coverage
+**/*.tsbuildinfo
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+.vscode
+.idea
+*.log
+Dockerfile
+**/Dockerfile
+docker-compose.yml
+README.md
+docs

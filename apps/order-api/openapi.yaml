@@ -1,0 +1,454 @@
+openapi: 3.1.0
+info:
+  title: Order API
+  version: 0.1.0
+  description: |
+    Source of truth for orders. Consumed by the support agent (service to service).
+    Every response uses the same envelope with a machine readable `code`.
+    The customer is resolved by the caller (phone -> customer) and sent in `X-Customer-Ref`;
+    an order that does not exist and an order that belongs to another customer produce the same 404.
+servers:
+  - url: http://localhost:3001
+    description: Local (docker compose)
+tags:
+  - name: Orders
+  - name: Ops
+security:
+  - bearerAuth: []
+paths:
+  /orders/{id}:
+    get:
+      tags: [Orders]
+      operationId: getOrder
+      summary: Get an order of the customer
+      parameters:
+        - $ref: "#/components/parameters/OrderId"
+        - $ref: "#/components/parameters/CustomerRef"
+        - $ref: "#/components/parameters/TraceId"
+      responses:
+        "200":
+          description: Order exists and belongs to the customer in X-Customer-Ref.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrderSuccess"
+              example:
+                ok: true
+                code: OK
+                message: Order found
+                data:
+                  id: "1042"
+                  status: PROCESSING
+                  totalAmount: 109.95
+                  currency: BRL
+                  items:
+                    - productExternalId: 1
+                      productTitle: Fjallraven Backpack
+                      quantity: 1
+                      unitPrice: 109.95
+                  createdAt: "2026-10-19T14:00:00.000Z"
+                  shippedAt: null
+                  cancelledAt: null
+                requestId: req_01JB7Q2M4X
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/OrderNotFound"
+        "500":
+          $ref: "#/components/responses/TechnicalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /orders/{id}/cancellation:
+    post:
+      tags: [Orders]
+      operationId: cancelOrder
+      summary: Cancel an order that is still PROCESSING
+      description: |
+        Total and synchronous cancellation (PROCESSING -> CANCELLED). Repeating the call with the same
+        `Idempotency-Key` returns the same 200 and never cancels twice.
+      parameters:
+        - $ref: "#/components/parameters/OrderId"
+        - $ref: "#/components/parameters/CustomerRef"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/TraceId"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CancellationRequest"
+      responses:
+        "200":
+          description: Order was PROCESSING and is now CANCELLED, or the same Idempotency-Key was replayed.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CancellationSuccess"
+              example:
+                ok: true
+                code: CANCELLED
+                message: Order cancelled
+                data:
+                  orderId: "1042"
+                  status: CANCELLED
+                  cancelledAt: "2026-10-19T14:05:00.000Z"
+                  replayed: false
+                requestId: req_01JB7Q2M4Y
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/OrderNotFound"
+        "409":
+          description: Order cannot be cancelled in its current status.
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotCancellableError"
+              example:
+                ok: false
+                code: ORDER_NOT_CANCELLABLE
+                message: Order cannot be cancelled in its current status
+                details:
+                  orderId: "1043"
+                  currentStatus: SHIPPED
+                  reason: ALREADY_SHIPPED
+                requestId: req_01JB7Q2M4X
+        "500":
+          $ref: "#/components/responses/TechnicalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+  /health:
+    get:
+      tags: [Ops]
+      operationId: getHealth
+      summary: Liveness and database check (used by Docker)
+      security: []
+      responses:
+        "200":
+          description: Service is up.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+              example:
+                ok: true
+                code: OK
+                message: healthy
+                data:
+                  status: ok
+                requestId: req_01JB7Q2M4Z
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Service-to-service token read from the ORDER_API_TOKEN environment variable.
+  parameters:
+    OrderId:
+      name: id
+      in: path
+      required: true
+      description: Order id, 4 to 10 digits.
+      schema:
+        type: string
+        pattern: "^\\d{4,10}$"
+        examples: ["1042"]
+    CustomerRef:
+      name: X-Customer-Ref
+      in: header
+      required: true
+      description: |
+        Customer id resolved by the agent from the channel phone number. The LLM never chooses this value.
+        Missing or malformed header yields 400 VALIDATION_ERROR.
+      schema:
+        type: string
+        format: uuid
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Unique key per cancellation attempt. Missing header yields 400 VALIDATION_ERROR.
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+    TraceId:
+      name: X-Trace-Id
+      in: header
+      required: false
+      description: Correlation id propagated through webhook, agent and Order API logs. Generated if absent.
+      schema:
+        type: string
+        maxLength: 64
+  headers:
+    RequestId:
+      description: Same value as `requestId` in the body.
+      schema:
+        type: string
+  responses:
+    ValidationError:
+      description: Id out of format, missing header (X-Customer-Ref, Idempotency-Key) or invalid body.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            ok: false
+            code: VALIDATION_ERROR
+            message: Invalid request
+            details:
+              fields:
+                - path: id
+                  issue: must be 4 to 10 digits
+            requestId: req_01JB7Q2M50
+    Unauthorized:
+      description: Missing or invalid bearer token.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            ok: false
+            code: UNAUTHORIZED
+            message: Missing or invalid credentials
+            details: null
+            requestId: req_01JB7Q2M51
+    OrderNotFound:
+      description: |
+        Order does not exist or belongs to another customer. The response is identical in both cases
+        so the existence of the order is not revealed.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            ok: false
+            code: ORDER_NOT_FOUND
+            message: Order not found
+            details: null
+            requestId: req_01JB7Q2M52
+    TechnicalError:
+      description: Unexpected exception.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            ok: false
+            code: TECHNICAL_ERROR
+            message: Unexpected error
+            details: null
+            requestId: req_01JB7Q2M53
+    ServiceUnavailable:
+      description: Database unavailable.
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+          example:
+            ok: false
+            code: TECHNICAL_ERROR
+            message: Service temporarily unavailable
+            details: null
+            requestId: req_01JB7Q2M54
+  schemas:
+    OrderStatus:
+      type: string
+      enum: [PROCESSING, SHIPPED, DELIVERED, CANCELLED]
+    CancelReason:
+      type: string
+      enum: [ALREADY_SHIPPED, ALREADY_DELIVERED, ALREADY_CANCELLED]
+    ApiErrorCode:
+      type: string
+      enum: [VALIDATION_ERROR, ORDER_NOT_FOUND, ORDER_NOT_CANCELLABLE, UNAUTHORIZED, TECHNICAL_ERROR]
+    OrderItemView:
+      type: object
+      required: [productExternalId, productTitle, quantity, unitPrice]
+      properties:
+        productExternalId:
+          type: integer
+          minimum: 1
+          description: Product id in the Fake Store API (no foreign key, external system).
+        productTitle:
+          type: string
+          description: Title snapshot taken when the order was placed.
+        quantity:
+          type: integer
+          minimum: 1
+        unitPrice:
+          type: number
+          minimum: 0
+    OrderView:
+      type: object
+      required: [id, status, totalAmount, currency, items, createdAt, shippedAt, cancelledAt]
+      properties:
+        id:
+          type: string
+          pattern: "^\\d{4,10}$"
+        status:
+          $ref: "#/components/schemas/OrderStatus"
+        totalAmount:
+          type: number
+          minimum: 0
+        currency:
+          type: string
+          minLength: 3
+          maxLength: 3
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/OrderItemView"
+        createdAt:
+          type: string
+          format: date-time
+        shippedAt:
+          type: [string, "null"]
+          format: date-time
+        cancelledAt:
+          type: [string, "null"]
+          format: date-time
+    CancellationView:
+      type: object
+      required: [orderId, status, cancelledAt, replayed]
+      properties:
+        orderId:
+          type: string
+          pattern: "^\\d{4,10}$"
+        status:
+          type: string
+          const: CANCELLED
+        cancelledAt:
+          type: string
+          format: date-time
+        replayed:
+          type: boolean
+          description: True when the same Idempotency-Key was replayed and the stored result returned.
+    CancellationRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        channel:
+          type: string
+          maxLength: 32
+          description: Origin channel of the request, stored for audit (for example "agent").
+        reasonCode:
+          type: string
+          maxLength: 64
+          description: Optional free code describing why the customer cancelled.
+    OrderSuccess:
+      type: object
+      required: [ok, code, message, data, requestId]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+          const: OK
+        message:
+          type: string
+        data:
+          $ref: "#/components/schemas/OrderView"
+        requestId:
+          type: string
+    CancellationSuccess:
+      type: object
+      required: [ok, code, message, data, requestId]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+          const: CANCELLED
+        message:
+          type: string
+        data:
+          $ref: "#/components/schemas/CancellationView"
+        requestId:
+          type: string
+    HealthResponse:
+      type: object
+      required: [ok, code, message, data, requestId]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        code:
+          type: string
+          const: OK
+        message:
+          type: string
+        data:
+          type: object
+          required: [status]
+          properties:
+            status:
+              type: string
+              const: ok
+        requestId:
+          type: string
+    ErrorEnvelope:
+      type: object
+      required: [ok, code, message, details, requestId]
+      properties:
+        ok:
+          type: boolean
+          const: false
+        code:
+          $ref: "#/components/schemas/ApiErrorCode"
+        message:
+          type: string
+        details:
+          type: [object, "null"]
+          additionalProperties: true
+        requestId:
+          type: string
+    NotCancellableError:
+      allOf:
+        - $ref: "#/components/schemas/ErrorEnvelope"
+        - type: object
+          properties:
+            code:
+              type: string
+              const: ORDER_NOT_CANCELLABLE
+            details:
+              type: object
+              required: [orderId, currentStatus, reason]
+              properties:
+                orderId:
+                  type: string
+                currentStatus:
+                  $ref: "#/components/schemas/OrderStatus"
+                reason:
+                  $ref: "#/components/schemas/CancelReason"

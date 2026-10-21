@@ -1,0 +1,32 @@
+{
+  "name": "@desafio/agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@langchain/core": "^1.2.20",
+    "@langchain/google-genai": "^2.3.4",
+    "@langchain/langgraph": "^1.5.1",
+    "@langchain/langgraph-checkpoint-postgres": "^1.1.0",
+    "express": "^5.3.0",
+    "lru-cache": "^10.4.3",
+    "pg": "^8.23.1",
+    "pino": "^10.4.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/pg": "^8.23.1",
+    "@types/supertest": "^7.2.1",
+    "nock": "^15.0.5",
+    "supertest": "^7.3.1"
+  }
+}
